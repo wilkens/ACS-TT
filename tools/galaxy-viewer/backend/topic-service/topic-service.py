@@ -1,14 +1,34 @@
-from bottle import Bottle, request, abort
+from bottle import Bottle, request, response, abort
 from bottle_mongo import MongoPlugin
 from bson import ObjectId
 from collections import defaultdict, Counter, OrderedDict
 from operator import itemgetter
 
 
-plugin = MongoPlugin(uri='mongodb://127.0.0.1', db='galaxyviewer', json_mongo=True)
+class EnableCors(object):
+    name = 'enable_cors'
+    api = 2
+
+    def apply(self, fn, context):
+        def _enable_cors(*args, **kwargs):
+            # set CORS headers
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Origin, Accept, Content-Type, ' \
+                                                               'X-Requested-With, X-CSRF-Token'
+
+            if request.method != 'OPTIONS':
+                # actual request; reply with the actual response
+                return fn(*args, **kwargs)
+
+        return _enable_cors
+
+
+mongo_plugin = MongoPlugin(uri='mongodb://127.0.0.1', db='galaxyviewer', json_mongo=True)
 
 app = Bottle()
-app.install(plugin)
+app.install(mongo_plugin)
+app.install(EnableCors())
 
 
 def jsonp(dictionary):
@@ -121,7 +141,8 @@ def get_corpus_token_counts_by_year(dataset_id, mongodb):
 
     for topic in q:
         for doc in topic['documents']:
-            year = documents[doc['id']]['date'].year
+            publish_date = documents[doc['id']]['publishDate']
+            year = publish_date.year if publish_date is not None else -1  # a bit ugly, but None breaks sorted(...)
             doc_token_counts = zip(doc['tokens'], doc['counts'])
             topic_token_counts = Counter(dict(doc_token_counts))
             years[year].update(topic_token_counts)
@@ -143,7 +164,8 @@ def get_corpus_doc_counts_by_year(dataset_id, mongodb):
     years = Counter()
 
     for doc in documents:
-        year = doc['date'].year
+        publish_date = doc['publishDate']
+        year = publish_date.year if publish_date is not None else -1  # a bit ugly, but None breaks sorted(...)
         years[year] += 1
 
     doc_counts_by_year = OrderedDict(sorted([(y, c) for y, c in years.items()], key=itemgetter(0)))
@@ -174,9 +196,9 @@ def get_topic_token_counts(dataset_id, topic_id, mongodb):
         doc_token_counts = Counter(dict(zip(tokens, doc['counts'])))
         token_counts.update(doc_token_counts)
 
-    token_counts = {word: token_counts[word] for word in topic_keywords}
+    token_counts = [[word, token_counts[word]] for word in topic_keywords]
 
-    return jsonp(token_counts)
+    return jsonp({'token_counts': token_counts})
 
 
 @app.route('/datasets/<dataset_id>/topics/<topic_id:int>/doc_prominence', method='GET')
@@ -204,8 +226,10 @@ def get_topic_doc_prominence(dataset_id, topic_id, mongodb):
     for doc_id, prominence in counter.most_common(n=max_results):
         doc = documents[doc_id]
         doc['prominence'] = prominence
-        doc['date'] = doc['date'].isoformat()
-        del doc['source']
+        publish_date = doc['publishDate']
+        doc['publishDate'] = publish_date.isoformat() if publish_date is not None else None
+        if 'volid' not in doc:
+            doc['volid'] = str(doc_id)
         result.append(doc)
 
     return jsonp({'doc_prominence': result})
@@ -231,7 +255,8 @@ def get_topic_token_counts_by_year(dataset_id, topic_id, mongodb):
 
     years = defaultdict(Counter)
     for doc in topic_documents:
-        year = documents[doc['id']]['date'].year
+        publish_date = documents[doc['id']]['publishDate']
+        year = publish_date.year if publish_date is not None else None
         tokens = [token_map[tid] for tid in doc['tokens']]
         doc_token_counts = zip(tokens, doc['counts'])
         topic_token_counts = Counter({t: c for t, c in doc_token_counts if t in topic_keywords})
@@ -239,7 +264,17 @@ def get_topic_token_counts_by_year(dataset_id, topic_id, mongodb):
 
     return jsonp(years)
 
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host',  metavar='host', dest='host', default='localhost',
+                        help="hostname or ip address")
+    parser.add_argument('--port', metavar='port', dest='port', type=int, default=8080,
+                        help="port number")
+    parser.add_argument('--debug', dest='debug', action='store_true',
+                        help="enable debug mode")
+    args = parser.parse_args()
 
-app.run(host='localhost', port=8080, debug=True)
+    app.run(host=args.host, port=args.port, debug=args.debug)
 
 
